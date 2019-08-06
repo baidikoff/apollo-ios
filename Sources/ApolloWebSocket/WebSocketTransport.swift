@@ -93,11 +93,6 @@ public class WebSocketTransport {
 
                         responseHandler(.failure(websocketError))
                     }
-                } else {
-                    let websocketError = WebSocketError(payload: payload,
-                                                        error: error,
-                                                        kind: .unprocessedMessage(text))
-                    self.notifyErrorAllHandlers(websocketError)
                 }
             case .complete:
                 if let id = id {
@@ -105,8 +100,6 @@ public class WebSocketTransport {
                     if subscriptions[id] == nil {
                         subscribers.removeValue(forKey: id)
                     }
-                } else {
-                    notifyErrorAllHandlers(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
                 }
 
             case .connectionAck:
