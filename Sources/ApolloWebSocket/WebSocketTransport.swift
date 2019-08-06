@@ -1,5 +1,8 @@
+#if !COCOAPODS
 import Apollo
+#endif
 import Starscream
+import Foundation
 
 // To allow for alternative implementations supporting the same WebSocketClient protocol
 public class ApolloWebSocket: WebSocket, ApolloWebSocketClient {
@@ -13,120 +16,139 @@ public protocol ApolloWebSocketClient: WebSocketClient {
 }
 
 public protocol WebSocketTransportDelegate: class {
-    func webSocketTransportDidConnect(_ webSocketTransport: WebSocketTransport)
-    func webSocketTransportDidReconnect(_ webSocketTransport: WebSocketTransport)
-    func webSocketTransport(_ webSocketTransport: WebSocketTransport, didDisconnectWithError error:Error?)
+  func webSocketTransportDidConnect(_ webSocketTransport: WebSocketTransport)
+  func webSocketTransportDidReconnect(_ webSocketTransport: WebSocketTransport)
+  func webSocketTransport(_ webSocketTransport: WebSocketTransport, didDisconnectWithError error:Error?)
 }
 
 public extension WebSocketTransportDelegate {
-    func webSocketTransportDidConnect(_ webSocketTransport: WebSocketTransport) {}
-    func webSocketTransportDidReconnect(_ webSocketTransport: WebSocketTransport) {}
-    func webSocketTransport(_ webSocketTransport: WebSocketTransport, didDisconnectWithError error:Error?) {}
+  func webSocketTransportDidConnect(_ webSocketTransport: WebSocketTransport) {}
+  func webSocketTransportDidReconnect(_ webSocketTransport: WebSocketTransport) {}
+  func webSocketTransport(_ webSocketTransport: WebSocketTransport, didDisconnectWithError error:Error?) {}
 }
 
 /// A network transport that uses web sockets requests to send GraphQL subscription operations to a server, and that uses the Starscream implementation of web sockets.
-public class WebSocketTransport: NetworkTransport, WebSocketDelegate {
-    public static var provider : ApolloWebSocketClient.Type = ApolloWebSocket.self
-    public weak var delegate: WebSocketTransportDelegate?
-    
-    var reconnect = false
-    var websocket: ApolloWebSocketClient
-    var error: Error? = nil
-    let serializationFormat = JSONSerializationFormat.self
-    
-    private final let protocols = ["graphql-ws"]
-    
-    private var acked = false
-    
-    private var queue: [Int: String] = [:]
-    private var connectingPayload: GraphQLMap?
-    
-    private var subscribers = [String: (JSONObject?, Error?) -> Void]()
-    private var subscriptions : [String: String] = [:]
-    
-    private let sendOperationIdentifiers: Bool
-    private let reconnectionInterval: TimeInterval
-    fileprivate var sequenceNumber = 0
-    fileprivate var reconnected = false
-    
-    public init(request: URLRequest, sendOperationIdentifiers: Bool = false, reconnectionInterval: TimeInterval = 0.5, connectingPayload: GraphQLMap? = [:]) {
-        self.connectingPayload = connectingPayload
-        self.sendOperationIdentifiers = sendOperationIdentifiers
-        self.reconnectionInterval = reconnectionInterval
-        
-        self.websocket = WebSocketTransport.provider.init(request: request, protocols: protocols)
-        self.websocket.delegate = self
-        self.websocket.connect()
-    }
-    
-    public func send<Operation>(operation: Operation, completionHandler: @escaping (_ response: GraphQLResponse<Operation>?, _ error: Error?) -> Void) -> Cancellable {
-        if let error = self.error {
-            completionHandler(nil,error)
+public class WebSocketTransport {
+  public static var provider: ApolloWebSocketClient.Type = ApolloWebSocket.self
+  public weak var delegate: WebSocketTransportDelegate?
+  
+  var reconnect = false
+  var websocket: ApolloWebSocketClient
+  var error: Error? = nil
+  let serializationFormat = JSONSerializationFormat.self
+  
+  private final let protocols = ["graphql-ws"]
+  
+  private var acked = false
+  
+  private var queue: [Int: String] = [:]
+  private var connectingPayload: GraphQLMap?
+  
+  private var subscribers = [String: (Result<JSONObject, Error>) -> Void]()
+  private var subscriptions : [String: String] = [:]
+  
+  private let sendOperationIdentifiers: Bool
+  private let reconnectionInterval: TimeInterval
+  fileprivate var sequenceNumber = 0
+  fileprivate var reconnected = false
+
+  public init(request: URLRequest, sendOperationIdentifiers: Bool = false, reconnectionInterval: TimeInterval = 0.5, connectingPayload: GraphQLMap? = [:]) {
+    self.connectingPayload = connectingPayload
+    self.sendOperationIdentifiers = sendOperationIdentifiers
+    self.reconnectionInterval = reconnectionInterval
+
+    self.websocket = WebSocketTransport.provider.init(request: request, protocols: protocols)
+    self.websocket.delegate = self
+    self.websocket.connect()
+  }
+  
+  public func isConnected() -> Bool {
+    return websocket.isConnected
+  }
+
+  public func ping(data: Data, completionHandler: (() -> Void)? = nil) {
+    return websocket.write(ping: data, completion: completionHandler)
+  }
+
+  private func processMessage(socket: WebSocketClient, text: String) {
+    OperationMessage(serialized: text).parse { (type, id, payload, error) in
+      guard
+        let type = type,
+        let messageType = OperationMessage.Types(rawValue: type) else {
+          self.notifyErrorAllHandlers(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
+          return
+      }
+
+      switch messageType {
+      case .data,
+           .error:
+        if
+          let id = id,
+          let responseHandler = subscribers[id] {
+          if let payload = payload {
+            responseHandler(.success(payload))
+          } else if let error = error {
+            responseHandler(.failure(error))
+          } else {
+            let websocketError = WebSocketError(payload: payload,
+                                                error: error,
+                                                kind: .neitherErrorNorPayloadReceived)
+            responseHandler(.failure(websocketError))
+          }
+        } else {
+          let websocketError = WebSocketError(payload: payload,
+                                              error: error,
+                                              kind: .unprocessedMessage(text))
+          self.notifyErrorAllHandlers(websocketError)
         }
-        
-        return WebSocketTask(self,operation) { (body,  error) in
-            if let body = body {
-                let response = GraphQLResponse(operation: operation, body: body)
-                completionHandler(response,error)
-            } else {
-                completionHandler(nil,error)
-            }
+      case .complete:
+        if let id = id {
+          // remove the callback if NOT a subscription
+          if subscriptions[id] == nil {
+            subscribers.removeValue(forKey: id)
+          }
+        } else {
+          notifyErrorAllHandlers(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
         }
-        
+
+      case .connectionAck:
+        acked = true
+        writeQueue()
+
+      case .connectionKeepAlive:
+        writeQueue()
+
+      case .connectionInit, .connectionTerminate, .start, .stop, .connectionError:
+        notifyErrorAllHandlers(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
+      }
     }
-    
-    public func isConnected() -> Bool {
-        return websocket.isConnected
+  }
+  
+  private func notifyErrorAllHandlers(_ error: Error) {
+    for (_, handler) in subscribers {
+      handler(.failure(error))
     }
-    
-    private func processMessage(socket: WebSocketClient, text: String) {
-        OperationMessage(serialized: text).parse { (type, id, payload, error) in
-            guard let type = type, let messageType = OperationMessage.Types(rawValue: type) else {
-                notifyErrorAllHandlers(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
-                return
-            }
-            
-            switch(messageType) {
-            case .data, .error:
-                if let id = id {
-                    if let responseHandler = subscribers[id] {
-                        responseHandler(payload,error)
-                    } else {
-                        notifyErrorHandler(with: id, error: WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
-                    }
-                }
-                
-            case .complete:
-                if let id = id, subscriptions[id] == nil {
-                    subscribers.removeValue(forKey: id)
-                }
-                
-            case .connectionAck:
-                acked = true
-                writeQueue()
-                
-            case .connectionKeepAlive:
-                writeQueue()
-                
-            case .connectionInit, .connectionTerminate, .start, .stop, .connectionError:
-                if let id = id {
-                    notifyErrorHandler(with: id, error: WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
-                } else {
-                    notifyErrorAllHandlers(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
-                }
-            }
-        }
+  }
+  
+  private func writeQueue() {
+    guard !self.queue.isEmpty else {
+      return
     }
-    
-    private func notifyErrorHandler(with id: String, error: Error) {
-        subscribers[id]?(nil, error)
+
+    let queue = self.queue.sorted(by: { $0.0 < $1.0 })
+    self.queue.removeAll()
+    for (id, msg) in queue {
+      self.write(msg,id: id)
     }
-    
-    private func notifyErrorAllHandlers(_ error: Error) {
-        for (_, handler) in subscribers {
-            handler(nil,error)
-        }
-    }
+  }
+  
+  private func processMessage(socket: WebSocketClient, data: Data) {
+    print("WebSocketTransport::unprocessed event \(data)")
+  }
+  
+  public func initServer(reconnect: Bool = true) {
+    self.reconnect = reconnect
+    self.acked = false
     
     private func writeQueue() {
         guard !self.queue.isEmpty else {
@@ -160,6 +182,21 @@ public class WebSocketTransport: NetworkTransport, WebSocketDelegate {
         
         reconnected = true
     }
+  }
+  
+  deinit {
+    websocket.disconnect()
+    websocket.delegate = nil
+  }
+  
+  fileprivate func nextSequenceNumber() -> Int {
+    sequenceNumber += 1
+    return sequenceNumber
+  }
+  
+  fileprivate func sendHelper<Operation: GraphQLOperation>(operation: Operation, resultHandler: @escaping (_ result: Result<JSONObject, Error>) -> Void) -> String? {
+    let body = RequestCreator.requestBody(for: operation, sendOperationIdentifiers: self.sendOperationIdentifiers)
+    let sequenceNumber = "\(nextSequenceNumber())"
     
     public func websocketDidDisconnect(socket: WebSocketClient, error: Error?) {
         // report any error to all subscribers
@@ -185,28 +222,25 @@ public class WebSocketTransport: NetworkTransport, WebSocketDelegate {
     public func websocketDidReceiveMessage(socket: WebSocketClient, text: String) {
         processMessage(socket: socket, text: text)
     }
-    
-    public func websocketDidReceiveData(socket: WebSocketClient, data: Data) {
-        processMessage(socket: socket, data: data)
+
+    return sequenceNumber
+  }
+  
+  public func unsubscribe(_ subscriptionId: String) {
+    if let str = OperationMessage(id: subscriptionId, type: .stop).rawMessage {
+      write(str)
     }
+    subscribers.removeValue(forKey: subscriptionId)
+    subscriptions.removeValue(forKey: subscriptionId)
+  }
+  
+  fileprivate final class WebSocketTask<Operation: GraphQLOperation>: Cancellable {
+    let sequenceNumber : String?
+    let transport: WebSocketTransport
     
-    public func initServer(reconnect: Bool = true) {
-        self.reconnect = reconnect
-        self.acked = false
-        
-        if let str = OperationMessage(payload: self.connectingPayload, type: .connectionInit).rawMessage {
-            write(str, force:true)
-        }
-        
-    }
-    
-    public func closeConnection() {
-        self.reconnect = false
-        if let str = OperationMessage(type: .connectionTerminate).rawMessage {
-            write(str)
-        }
-        self.queue.removeAll()
-        self.subscriptions.removeAll()
+    init(_ ws: WebSocketTransport, _ operation: Operation, _ completionHandler: @escaping (_ result: Result<JSONObject, Error>) -> Void) {
+      sequenceNumber = ws.sendHelper(operation: operation, resultHandler: completionHandler)
+      transport = ws
     }
     
     private func write(_ str: String, force forced: Bool = false, id: Int? = nil) {
@@ -366,29 +400,106 @@ public class WebSocketTransport: NetworkTransport, WebSocketDelegate {
     
 }
 
-public struct WebSocketError: Error, LocalizedError {
-    public enum ErrorKind {
-        case errorResponse
-        case networkError
-        case unprocessedMessage(String)
-        case serializedMessageError
-        
-        var description: String {
-            switch self {
-            case .errorResponse:
-                return "Received error response"
-            case .networkError:
-                return "Websocket network error"
-            case .unprocessedMessage(let message):
-                return "Websocket error: Unprocessed message \(message)"
-            case .serializedMessageError:
-                return "Websocket error: Serialized message not found"
-            }
-        }
+// MARK: - HTTPNetworkTransport conformance
+
+extension WebSocketTransport: NetworkTransport {
+  public func send<Operation>(operation: Operation, completionHandler: @escaping (_ result: Result<GraphQLResponse<Operation>,Error>) -> Void) -> Cancellable {
+    if let error = self.error {
+      completionHandler(.failure(error))
+      return EmptyCancellable()
     }
     
-    /// The payload of the response.
-    public let payload: JSONObject?
-    public let error: Error?
-    public let kind: ErrorKind
+    return WebSocketTask(self, operation) { result in
+      switch result {
+      case .success(let jsonBody):
+        let response = GraphQLResponse(operation: operation, body: jsonBody)
+        completionHandler(.success(response))
+      case .failure(let error):
+        completionHandler(.failure(error))
+      }
+    }
+  }
+}
+
+// MARK: - WebSocketDelegate implementation
+
+extension WebSocketTransport: WebSocketDelegate {
+  
+  public func websocketDidConnect(socket: WebSocketClient) {
+    self.error = nil
+    initServer()
+    if reconnected {
+      self.delegate?.webSocketTransportDidReconnect(self)
+      // re-send the subscriptions whenever we are re-connected
+      // for the first connect, any subscriptions are already in queue
+      for (_,msg) in self.subscriptions {
+        write(msg)
+      }
+    } else {
+      self.delegate?.webSocketTransportDidConnect(self)
+    }
+    
+    reconnected = true
+  }
+  
+  public func websocketDidDisconnect(socket: WebSocketClient, error: Error?) {
+    // report any error to all subscribers
+    if let error = error {
+      self.error = WebSocketError(payload: nil, error: error, kind: .networkError)
+      self.notifyErrorAllHandlers(error)
+    } else {
+      self.error = nil
+    }
+    
+    self.delegate?.webSocketTransport(self, didDisconnectWithError: self.error)
+    acked = false // need new connect and ack before sending
+    
+    if reconnect {
+      DispatchQueue.main.asyncAfter(deadline: .now() + reconnectionInterval) {
+        self.websocket.connect()
+      }
+    }
+  }
+  
+  public func websocketDidReceiveMessage(socket: WebSocketClient, text: String) {
+    processMessage(socket: socket, text: text)
+  }
+  
+  public func websocketDidReceiveData(socket: WebSocketClient, data: Data) {
+    processMessage(socket: socket, data: data)
+  }
+}
+
+public struct WebSocketError: Error, LocalizedError {
+  public enum ErrorKind {
+    case errorResponse
+    case networkError
+    case unprocessedMessage(String)
+    case serializedMessageError
+    case neitherErrorNorPayloadReceived
+    
+    var description: String {
+      switch self {
+      case .errorResponse:
+        return "Received error response"
+      case .networkError:
+        return "Websocket network error"
+      case .unprocessedMessage(let message):
+        return "Websocket error: Unprocessed message \(message)"
+      case .serializedMessageError:
+        return "Websocket error: Serialized message not found"
+      case .neitherErrorNorPayloadReceived:
+        return "Websocket error: Did not receive an error or a payload."
+      }
+    }
+  }
+  
+  /// The payload of the response.
+  public let payload: JSONObject?
+  public let error: Error?
+  public let kind: ErrorKind
+  
+  public var errorDescription: String? {
+    return "\(self.kind.description). Error: \(String(describing: self.error))"
+  }
 }
