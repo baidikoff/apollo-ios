@@ -77,16 +77,18 @@ public class WebSocketTransport {
             guard
                 let type = type,
                 let messageType = OperationMessage.Types(rawValue: type) else {
-                self.notifyErrorAllHandlers(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
+                if let id = id {
+                    self.notifyError(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)), id: id)
+                } else {
+                    self.notifyErrorAllHandlers(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
+                }
+
                 return
             }
 
             switch messageType {
-            case .data,
-                 .error:
-                if
-                    let id = id,
-                    let responseHandler = subscribers[id] {
+            case .data, .error:
+                if let id = id, let responseHandler = subscribers[id] {
                     if let payload = payload {
                         responseHandler(.success(payload))
                     } else if let error = error {
@@ -97,20 +99,14 @@ public class WebSocketTransport {
                                                             kind: .neitherErrorNorPayloadReceived)
                         responseHandler(.failure(websocketError))
                     }
-                } else {
-                    let websocketError = WebSocketError(payload: payload,
-                                                        error: error,
-                                                        kind: .unprocessedMessage(text))
-                    self.notifyErrorAllHandlers(websocketError)
                 }
+
             case .complete:
                 if let id = id {
                     // remove the callback if NOT a subscription
                     if subscriptions[id] == nil {
                         subscribers.removeValue(forKey: id)
                     }
-                } else {
-                    notifyErrorAllHandlers(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
                 }
 
             case .connectionAck:
@@ -121,11 +117,9 @@ public class WebSocketTransport {
                 writeQueue()
 
             case .connectionInit, .connectionTerminate, .start, .stop, .connectionError:
-              if let id = id {
-                notifyError(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)), id: id)
-              } else {
-                notifyErrorAllHandlers(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)))
-              }
+                if let id = id {
+                    notifyError(WebSocketError(payload: payload, error: error, kind: .unprocessedMessage(text)), id: id)
+                }
             }
         }
     }
@@ -135,10 +129,10 @@ public class WebSocketTransport {
             handler(.failure(error))
         }
     }
-  
-  private func notifyError(_ error: Error, id: String) {
-    self.subscribers[id]?(.failure(error))
-  }
+
+    private func notifyError(_ error: Error, id: String) {
+        self.subscribers[id]?(.failure(error))
+    }
 
     private func writeQueue() {
         guard !self.queue.isEmpty else {
