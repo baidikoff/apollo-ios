@@ -74,39 +74,31 @@ public class HTTPNetworkTransport {
   let serializationFormat = JSONSerializationFormat.self
   let useGETForQueries: Bool
   let delegate: HTTPNetworkTransportDelegate?
+  private let requestCreator: RequestCreator
   private let sendOperationIdentifiers: Bool
   
   /// Creates a network transport with the specified server URL and session configuration.
   ///
   /// - Parameters:
   ///   - url: The URL of a GraphQL server to connect to.
-  ///   - configuration: A session configuration used to configure the session. Defaults to `URLSessionConfiguration.default`.
+  ///   - session: The URLSession to use. Defaults to `URLSession.shared`,
   ///   - sendOperationIdentifiers: Whether to send operation identifiers rather than full operation text, for use with servers that support query persistence. Defaults to false.
   ///   - useGETForQueries: If query operation should be sent using GET instead of POST. Defaults to false.
   ///   - delegate: [Optional] A delegate which can conform to any or all of `HTTPNetworkTransportPreflightDelegate`, `HTTPNetworkTransportTaskCompletedDelegate`, and `HTTPNetworkTransportRetryDelegate`. Defaults to nil.
   public init(url: URL,
-              configuration: URLSessionConfiguration = .default,
+              session: URLSession = .shared,
               sendOperationIdentifiers: Bool = false,
               useGETForQueries: Bool = false,
-              delegate: HTTPNetworkTransportDelegate? = nil) {
+              delegate: HTTPNetworkTransportDelegate? = nil,
+              requestCreator: RequestCreator = ApolloRequestCreator()) {
     self.url = url
-    self.session = URLSession(configuration: configuration)
+    self.session = session
     self.sendOperationIdentifiers = sendOperationIdentifiers
     self.useGETForQueries = useGETForQueries
     self.delegate = delegate
+    self.requestCreator = requestCreator
   }
-  
-  /// Uploads the given files with the given operation. 
-  ///
-  /// - Parameters:
-  ///   - operation: The operation to send
-  ///   - files: An array of `GraphQLFile` objects to send.
-  ///   - completionHandler: The completion handler to execute when the request completes or errors
-  /// - Returns: An object that can be used to cancel an in progress request.
-  public func upload<Operation>(operation: Operation, files: [GraphQLFile], completionHandler: @escaping (_ result: Result<GraphQLResponse<Operation>, Error>) -> Void) -> Cancellable {
-    return send(operation: operation, files: files, completionHandler: completionHandler)
-  }
-  
+
   private func send<Operation>(operation: Operation, files: [GraphQLFile]?, completionHandler: @escaping (_ results: Result<GraphQLResponse<Operation>, Error>) -> Void) -> Cancellable {
     let request: URLRequest
     do {
@@ -224,9 +216,12 @@ public class HTTPNetworkTransport {
   }
   
   private func createRequest<Operation: GraphQLOperation>(for operation: Operation, files: [GraphQLFile]?) throws -> URLRequest {
-    let body = RequestCreator.requestBody(for: operation, sendOperationIdentifiers: self.sendOperationIdentifiers)
+    let body = requestCreator.requestBody(for: operation, sendOperationIdentifiers: self.sendOperationIdentifiers)
     var request = URLRequest(url: self.url)
     
+    // We default to json, but this can be changed below if needed.
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
     if self.useGETForQueries && operation.operationType == .query {
       let transformer = GraphQLGETTransformer(body: body, url: self.url)
       if let urlForGet = transformer.createGetURL() {
@@ -238,7 +233,7 @@ public class HTTPNetworkTransport {
     } else {
       do {
         if let files = files, !files.isEmpty {
-          let formData = try RequestCreator.requestMultipartFormData(
+          let formData = try requestCreator.requestMultipartFormData(
             for: operation,
             files: files,
             sendOperationIdentifiers: self.sendOperationIdentifiers,
@@ -262,8 +257,6 @@ public class HTTPNetworkTransport {
       request.setValue(operationID, forHTTPHeaderField: "X-APOLLO-OPERATION-ID")
     }
     
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    
     // If there's a delegate, do a pre-flight check and allow modifications to the request.
     if
       let delegate = self.delegate,
@@ -285,5 +278,26 @@ extension HTTPNetworkTransport: NetworkTransport {
   
   public func send<Operation>(operation: Operation, completionHandler: @escaping (_ result: Result<GraphQLResponse<Operation>, Error>) -> Void) -> Cancellable {
     return send(operation: operation, files: nil, completionHandler: completionHandler)
+  }
+}
+
+// MARK: - UploadingNetworkTransport conformance
+
+extension HTTPNetworkTransport: UploadingNetworkTransport {
+  
+  public func upload<Operation>(operation: Operation, files: [GraphQLFile], completionHandler: @escaping (_ result: Result<GraphQLResponse<Operation>, Error>) -> Void) -> Cancellable {
+    return send(operation: operation, files: files, completionHandler: completionHandler)
+  }
+}
+
+// MARK: - Equatable conformance
+
+extension HTTPNetworkTransport: Equatable {
+  
+  public static func ==(lhs: HTTPNetworkTransport, rhs: HTTPNetworkTransport) -> Bool {
+    return lhs.url == rhs.url
+      && lhs.session == rhs.session
+      && lhs.sendOperationIdentifiers == rhs.sendOperationIdentifiers
+      && lhs.useGETForQueries == rhs.useGETForQueries
   }
 }

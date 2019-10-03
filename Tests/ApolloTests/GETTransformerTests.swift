@@ -11,23 +11,23 @@ import XCTest
 import StarWarsAPI
 
 class GETTransformerTests: XCTestCase {
-  
+  private let requestCreator = ApolloRequestCreator()
   private lazy var url = URL(string: "http://localhost:8080/graphql")!
   
   func testEncodingQueryWithSingleParameter() {
     let operation = HeroNameQuery(episode: .empire)
-    let body = RequestCreator.requestBody(for: operation)
+    let body = requestCreator.requestBody(for: operation)
     
     let transformer = GraphQLGETTransformer(body: body, url: self.url)
     
     let url = transformer.createGetURL()
     
-    XCTAssertEqual(url?.absoluteString, "http://localhost:8080/graphql?operationName=HeroName&query=query%20HeroName($episode:%20Episode)%20%7B%0A%20%20hero(episode:%20$episode)%20%7B%0A%20%20%20%20__typename%0A%20%20%20%20name%0A%20%20%7D%0A%7D&variables=%7B%22episode%22:%22EMPIRE%22%7D")
+    XCTAssertEqual(url?.absoluteString, "http://localhost:8080/graphql?operationName=HeroName&query=query%20HeroName($episode:%20Episode)%20%7B%20hero(episode:%20$episode)%20%7B%20__typename%20name%20%7D%20%7D&variables=%7B%22episode%22:%22EMPIRE%22%7D")
   }
   
   func testEncodingQueryWithMoreThanOneParameterIncludingNonHashableValue() {
     let operation = HeroNameTypeSpecificConditionalInclusionQuery(episode: .jedi, includeName: true)
-    let body = RequestCreator.requestBody(for: operation)
+    let body = requestCreator.requestBody(for: operation)
     
     let transformer = GraphQLGETTransformer(body: body, url: self.url)
     
@@ -36,7 +36,7 @@ class GETTransformerTests: XCTestCase {
     if #available(iOS 11, macOS 13, tvOS 11, watchOS 4, *) {
       // Here, we know that everything should be encoded in a stable order,
       // and we can check the encoded URL string directly.
-          XCTAssertEqual(url?.absoluteString, "http://localhost:8080/graphql?operationName=HeroNameTypeSpecificConditionalInclusion&query=query%20HeroNameTypeSpecificConditionalInclusion($episode:%20Episode,%20$includeName:%20Boolean!)%20%7B%0A%20%20hero(episode:%20$episode)%20%7B%0A%20%20%20%20__typename%0A%20%20%20%20name%20@include(if:%20$includeName)%0A%20%20%20%20...%20on%20Droid%20%7B%0A%20%20%20%20%20%20name%0A%20%20%20%20%7D%0A%20%20%7D%0A%7D&variables=%7B%22episode%22:%22JEDI%22,%22includeName%22:true%7D")
+          XCTAssertEqual(url?.absoluteString, "http://localhost:8080/graphql?operationName=HeroNameTypeSpecificConditionalInclusion&query=query%20HeroNameTypeSpecificConditionalInclusion($episode:%20Episode,%20$includeName:%20Boolean!)%20%7B%20hero(episode:%20$episode)%20%7B%20__typename%20name%20@include(if:%20$includeName)%20...%20on%20Droid%20%7B%20name%20%7D%20%7D%20%7D&variables=%7B%22episode%22:%22JEDI%22,%22includeName%22:true%7D")
     } else {
       // We can't guarantee order of encoding, so we need to pull the JSON back
       // out and check that it has the correct and correctly typed properties.
@@ -90,12 +90,12 @@ class GETTransformerTests: XCTestCase {
   
   func testEncodingQueryWithNullDefaultParameter() {
     let operation = HeroNameQuery()
-    let body = RequestCreator.requestBody(for: operation)
+    let body = requestCreator.requestBody(for: operation)
     
     let transformer = GraphQLGETTransformer(body: body, url: self.url)
     
     let url = transformer.createGetURL()
     
-    XCTAssertEqual(url?.absoluteString, "http://localhost:8080/graphql?operationName=HeroName&query=query%20HeroName($episode:%20Episode)%20%7B%0A%20%20hero(episode:%20$episode)%20%7B%0A%20%20%20%20__typename%0A%20%20%20%20name%0A%20%20%7D%0A%7D&variables=%7B%22episode%22:null%7D")
+    XCTAssertEqual(url?.absoluteString, "http://localhost:8080/graphql?operationName=HeroName&query=query%20HeroName($episode:%20Episode)%20%7B%20hero(episode:%20$episode)%20%7B%20__typename%20name%20%7D%20%7D&variables=%7B%22episode%22:null%7D")
   }
 }

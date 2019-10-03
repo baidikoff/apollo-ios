@@ -21,30 +21,32 @@ public enum CachePolicy {
 ///   - result: The result of a performed operation. Will have a `GraphQLResult` with any parsed data and any GraphQL errors on `success`, and an `Error` on `failure`.
 public typealias GraphQLResultHandler<Data> = (Result<GraphQLResult<Data>, Error>) -> Void
 
-/// The `ApolloClient` class provides the core API for Apollo. This API provides methods to fetch and watch queries, and to perform mutations.
+/// The `ApolloClient` class implements the core API for Apollo by conforming to `ApolloClientProtocol`.
 public class ApolloClient {
+  
   let networkTransport: NetworkTransport
-    
-  public let store: ApolloStore
-    
-  public var cacheKeyForObject: CacheKeyForObject? {
-    get {
-      return store.cacheKeyForObject
-    }
-    
-    set {
-      store.cacheKeyForObject = newValue
-    }
-  }
-    
+  
+  public let store: ApolloStore // <- conformance to ApolloClientProtocol
+  
   private let queue: DispatchQueue
   private let operationQueue: OperationQueue
+  
+  public enum ApolloClientError: Error, LocalizedError {
+    case noUploadTransport
+    
+    public var localizedDescription: String {
+      switch self {
+      case .noUploadTransport:
+        return "Attempting to upload using a transport which does not support uploads. This is a developer error."
+      }
+    }
+  }
   
   /// Creates a client with the specified network transport and store.
   ///
   /// - Parameters:
   ///   - networkTransport: A network transport used to send operations to a server.
-  ///   - store: A store used as a local cache. Defaults to an empty store backed by an in memory cache.
+  ///   - store: A store used as a local cache. Should default to an empty store backed by an in-memory cache.
   public init(networkTransport: NetworkTransport, store: ApolloStore = ApolloStore(cache: InMemoryNormalizedCache())) {
     self.networkTransport = networkTransport
     self.store = store
@@ -60,107 +62,134 @@ public class ApolloClient {
   public convenience init(url: URL) {
     self.init(networkTransport: HTTPNetworkTransport(url: url))
   }
-
-  /// Clears the underlying cache.
-  /// Be aware: In more complex setups, the same underlying cache can be used across multiple instances, so if you call this on one instance, it'll clear that cache across all instances which share that cache.
-  ///
-  /// - Returns: Promise which fulfills when clear is complete.
-  public func clearCache() -> Promise<Void> {
-    return store.clearCache()
+  
+  fileprivate func send<Operation: GraphQLOperation>(operation: Operation, shouldPublishResultToStore: Bool, context: UnsafeMutableRawPointer?, resultHandler: @escaping GraphQLResultHandler<Operation.Data>) -> Cancellable {
+    return networkTransport.send(operation: operation) { result in
+      self.handleOperationResult(shouldPublishResultToStore: shouldPublishResultToStore,
+                                 context: context,
+                                 result,
+                                 resultHandler: resultHandler)
+    }
   }
   
-  /// Fetches a query from the server or from the local cache, depending on the current contents of the cache and the specified cache policy.
-  ///
-  /// - Parameters:
-  ///   - query: The query to fetch.
-  ///   - cachePolicy: A cache policy that specifies when results should be fetched from the server and when data should be loaded from the local cache.
-  ///   - queue: A dispatch queue on which the result handler will be called. Defaults to the main queue.
-  ///   - resultHandler: An optional closure that is called when query results are available or when an error occurs.
-  /// - Returns: An object that can be used to cancel an in progress fetch.
-  @discardableResult public func fetch<Query: GraphQLQuery>(query: Query, cachePolicy: CachePolicy = .returnCacheDataElseFetch, context: UnsafeMutableRawPointer? = nil, queue: DispatchQueue = DispatchQueue.main, resultHandler: GraphQLResultHandler<Query.Data>? = nil) -> Cancellable {
+  private func handleOperationResult<Operation>(shouldPublishResultToStore: Bool, context: UnsafeMutableRawPointer?, _ result: Result<GraphQLResponse<Operation>, Error>, resultHandler: @escaping GraphQLResultHandler<Operation.Data>) {
+    switch result {
+    case .failure(let error):
+      resultHandler(.failure(error))
+    case .success(let response):
+      // If there is no need to publish the result to the store, we can use a fast path.
+      if !shouldPublishResultToStore {
+        do {
+          let result = try response.parseResultFast()
+          resultHandler(.success(result))
+        } catch {
+          resultHandler(.failure(error))
+        }
+        return
+      }
+      
+      firstly {
+        try response.parseResult(cacheKeyForObject: self.cacheKeyForObject)
+        }.andThen { (result, records) in
+          if let records = records {
+            self.store.publish(records: records, context: context).catch { error in
+              preconditionFailure(String(describing: error))
+            }
+          }
+          resultHandler(.success(result))
+        }.catch { error in
+          resultHandler(.failure(error))
+      }
+    }
+  }
+}
+
+// MARK: - ApolloClientProtocol conformance
+
+extension ApolloClient: ApolloClientProtocol {
+  
+  public var cacheKeyForObject: CacheKeyForObject? {
+    get {
+      return self.store.cacheKeyForObject
+    }
+    
+    set {
+      self.store.cacheKeyForObject = newValue
+    }
+  }
+  
+  public func clearCache(callbackQueue: DispatchQueue = .main, completion: ((Result<Void, Error>) -> Void)? = nil) {
+    self.store.clearCache(completion: completion)
+  }
+  
+  @discardableResult public func fetch<Query: GraphQLQuery>(query: Query,
+                                                            cachePolicy: CachePolicy = .returnCacheDataElseFetch,
+                                                            context: UnsafeMutableRawPointer? = nil,
+                                                            queue: DispatchQueue = DispatchQueue.main,
+                                                            resultHandler: GraphQLResultHandler<Query.Data>? = nil) -> Cancellable {
     let resultHandler = wrapResultHandler(resultHandler, queue: queue)
     
     // If we don't have to go through the cache, there is no need to create an operation
     // and we can return a network task directly
     if cachePolicy == .fetchIgnoringCacheData || cachePolicy == .fetchIgnoringCacheCompletely {
-      return send(operation: query, shouldPublishResultToStore: cachePolicy != .fetchIgnoringCacheCompletely, context: context, resultHandler: resultHandler)
+      return self.send(operation: query, shouldPublishResultToStore: cachePolicy != .fetchIgnoringCacheCompletely, context: context, resultHandler: resultHandler)
     } else {
       let operation = FetchQueryOperation(client: self, query: query, cachePolicy: cachePolicy, context: context, resultHandler: resultHandler)
-      operationQueue.addOperation(operation)
+      self.operationQueue.addOperation(operation)
       return operation
     }
   }
   
-  /// Watches a query by first fetching an initial result from the server or from the local cache, depending on the current contents of the cache and the specified cache policy. After the initial fetch, the returned query watcher object will get notified whenever any of the data the query result depends on changes in the local cache, and calls the result handler again with the new result.
-  ///
-  /// - Parameters:
-  ///   - query: The query to fetch.
-  ///   - fetchHTTPMethod: The HTTP Method to be used.
-  ///   - cachePolicy: A cache policy that specifies when results should be fetched from the server or from the local cache.
-  ///   - queue: A dispatch queue on which the result handler will be called. Defaults to the main queue.
-  ///   - resultHandler: An optional closure that is called when query results are available or when an error occurs.
-  /// - Returns: A query watcher object that can be used to control the watching behavior.
-  public func watch<Query: GraphQLQuery>(query: Query, cachePolicy: CachePolicy = .returnCacheDataElseFetch, queue: DispatchQueue = DispatchQueue.main, resultHandler: @escaping GraphQLResultHandler<Query.Data>) -> GraphQLQueryWatcher<Query> {
-    let watcher = GraphQLQueryWatcher(client: self, query: query, resultHandler: wrapResultHandler(resultHandler, queue: queue))
+  public func watch<Query: GraphQLQuery>(query: Query,
+                                         cachePolicy: CachePolicy = .returnCacheDataElseFetch,
+                                         queue: DispatchQueue = .main,
+                                         resultHandler: @escaping GraphQLResultHandler<Query.Data>) -> GraphQLQueryWatcher<Query> {
+    let watcher = GraphQLQueryWatcher(client: self,
+                                      query: query,
+                                      resultHandler: wrapResultHandler(resultHandler, queue: queue))
     watcher.fetch(cachePolicy: cachePolicy)
     return watcher
   }
   
-  /// Performs a mutation by sending it to the server.
-  ///
-  /// - Parameters:
-  ///   - mutation: The mutation to perform.
-  ///   - fetchHTTPMethod: The HTTP Method to be used.
-  ///   - queue: A dispatch queue on which the result handler will be called. Defaults to the main queue.
-  ///   - resultHandler: An optional closure that is called when mutation results are available or when an error occurs.
-  /// - Returns: An object that can be used to cancel an in progress mutation.
-  @discardableResult public func perform<Mutation: GraphQLMutation>(mutation: Mutation, context: UnsafeMutableRawPointer? = nil, queue: DispatchQueue = DispatchQueue.main, resultHandler: GraphQLResultHandler<Mutation.Data>? = nil) -> Cancellable {
-    return send(operation: mutation, shouldPublishResultToStore: true, context: context, resultHandler: wrapResultHandler(resultHandler, queue: queue))
-  }
-
-  /// Subscribe to a subscription
-  ///
-  /// - Parameters:
-  ///   - subscription: The subscription to subscribe to.
-  ///   - fetchHTTPMethod: The HTTP Method to be used.
-  ///   - queue: A dispatch queue on which the result handler will be called. Defaults to the main queue.
-  ///   - resultHandler: An optional closure that is called when mutation results are available or when an error occurs.
-  /// - Returns: An object that can be used to cancel an in progress subscription.
-  @discardableResult public func subscribe<Subscription: GraphQLSubscription>(subscription: Subscription, queue: DispatchQueue = DispatchQueue.main, resultHandler: @escaping GraphQLResultHandler<Subscription.Data>) -> Cancellable {
-    return send(operation: subscription, shouldPublishResultToStore: true, context: nil, resultHandler: wrapResultHandler(resultHandler, queue: queue))
+  @discardableResult
+  public func perform<Mutation: GraphQLMutation>(mutation: Mutation,
+                                                 context: UnsafeMutableRawPointer? = nil,
+                                                 queue: DispatchQueue = DispatchQueue.main,
+                                                 resultHandler: GraphQLResultHandler<Mutation.Data>? = nil) -> Cancellable {
+    return self.send(operation: mutation,
+                     shouldPublishResultToStore: true,
+                     context: context,
+                     resultHandler: wrapResultHandler(resultHandler, queue: queue))
   }
   
-  fileprivate func send<Operation: GraphQLOperation>(operation: Operation, shouldPublishResultToStore: Bool, context: UnsafeMutableRawPointer?, resultHandler: @escaping GraphQLResultHandler<Operation.Data>) -> Cancellable {
-    return networkTransport.send(operation: operation) { result in
-      switch result {
-      case .failure(let error):
-        resultHandler(.failure(error))
-      case .success(let response):
-        // If there is no need to publish the result to the store, we can use a fast path.
-        if !shouldPublishResultToStore {
-          do {
-            let result = try response.parseResultFast()
-            resultHandler(.success(result))
-          } catch {
-            resultHandler(.failure(error))
-          }
-          return
-        }
-        
-        firstly {
-          try response.parseResult(cacheKeyForObject: self.cacheKeyForObject)
-          }.andThen { (result, records) in
-            if let records = records {
-              self.store.publish(records: records, context: context).catch { error in
-                preconditionFailure(String(describing: error))
-              }
-            }
-            resultHandler(.success(result))
-          }.catch { error in
-            resultHandler(.failure(error))
-        }
-      }
+  @discardableResult
+  public func upload<Operation: GraphQLOperation>(operation: Operation,
+                                                  context: UnsafeMutableRawPointer? = nil,
+                                                  files: [GraphQLFile],
+                                                  queue: DispatchQueue = .main,
+                                                  resultHandler: GraphQLResultHandler<Operation.Data>? = nil) -> Cancellable {
+    let wrappedHandler = wrapResultHandler(resultHandler, queue: queue)
+    guard let uploadingTransport = self.networkTransport as? UploadingNetworkTransport else {
+      assertionFailure("Trying to upload without an uploading transport. Please make sure your network transport conforms to `UploadingNetworkTransport`.")
+      wrappedHandler(.failure(ApolloClientError.noUploadTransport))
+      return EmptyCancellable()
     }
+    
+    return uploadingTransport.upload(operation: operation, files: files) { result in
+      self.handleOperationResult(shouldPublishResultToStore: true,
+                                 context: context, result,
+                                 resultHandler: wrappedHandler)
+    }
+  }
+  
+  @discardableResult
+  public func subscribe<Subscription: GraphQLSubscription>(subscription: Subscription,
+                                                           queue: DispatchQueue = .main,
+                                                           resultHandler: @escaping GraphQLResultHandler<Subscription.Data>) -> Cancellable {
+    return self.send(operation: subscription,
+                     shouldPublishResultToStore: true,
+                     context: nil,
+                     resultHandler: wrapResultHandler(resultHandler, queue: queue))
   }
 }
 

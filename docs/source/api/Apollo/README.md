@@ -1,5 +1,6 @@
 ## Protocols
 
+-   [ApolloClientProtocol](../protocols/ApolloClientProtocol/)
 -   [Cancellable](../protocols/Cancellable/)
 -   [GraphQLFragment](../protocols/GraphQLFragment/)
 -   [GraphQLInputValue](../protocols/GraphQLInputValue/)
@@ -19,9 +20,12 @@
 -   [Matchable](../protocols/Matchable/)
 -   [NetworkTransport](../protocols/NetworkTransport/)
 -   [NormalizedCache](../protocols/NormalizedCache/)
+-   [RequestCreator](../protocols/RequestCreator/)
+-   [UploadingNetworkTransport](../protocols/UploadingNetworkTransport/)
 
 ## Structs
 
+-   [ApolloRequestCreator](../structs/ApolloRequestCreator/)
 -   [GraphQLBooleanCondition](../structs/GraphQLBooleanCondition/)
 -   [GraphQLError](../structs/GraphQLError/)
 -   [GraphQLField](../structs/GraphQLField/)
@@ -37,7 +41,6 @@
 -   [Record](../structs/Record/)
 -   [RecordSet](../structs/RecordSet/)
 -   [Reference](../structs/Reference/)
--   [RequestCreator](../structs/RequestCreator/)
 
 ## Classes
 
@@ -49,26 +52,28 @@
 -   [HTTPNetworkTransport](../classes/HTTPNetworkTransport/)
 -   [InMemoryNormalizedCache](../classes/InMemoryNormalizedCache/)
 -   [JSONSerializationFormat](../classes/JSONSerializationFormat/)
--   [Promise](../classes/Promise/)
+-   [MultipartFormData](../classes/MultipartFormData/)
 -   [ReadTransaction](../classes/ReadTransaction/)
 -   [ReadWriteTransaction](../classes/ReadWriteTransaction/)
 
 ## Enums
 
+-   [ApolloClientError](../enums/ApolloClientError/)
 -   [CachePolicy](../enums/CachePolicy/)
 -   [ErrorKind](../enums/ErrorKind/)
 -   [GraphQLHTTPRequestError](../enums/GraphQLHTTPRequestError/)
 -   [GraphQLOperationType](../enums/GraphQLOperationType/)
 -   [GraphQLOutputType](../enums/GraphQLOutputType/)
 -   [JSONDecodingError](../enums/JSONDecodingError/)
--   [ResultOrPromise](../enums/ResultOrPromise/)
 -   [Source](../enums/Source/)
 
 ## Extensions
 
+-   [ApolloClient](../extensions/ApolloClient/)
 -   [Array](../extensions/Array/)
 -   [Bool](../extensions/Bool/)
 -   [Dictionary](../extensions/Dictionary/)
+-   [DispatchQueue](../extensions/DispatchQueue/)
 -   [Double](../extensions/Double/)
 -   [Float](../extensions/Float/)
 -   [GraphQLError](../extensions/GraphQLError/)
@@ -88,17 +93,15 @@
 -   [Record](../extensions/Record/)
 -   [RecordSet](../extensions/RecordSet/)
 -   [Reference](../extensions/Reference/)
+-   [RequestCreator](../extensions/RequestCreator/)
 -   [String](../extensions/String/)
 -   [URL](../extensions/URL/)
 
 ## Methods
 
--   [firstly(_:)](../methods/firstly(_:)/)
 -   [unzip(_:)](../methods/unzip(_:)/)
 -   [unzip(_:)](../methods/unzip(_:)/)
 -   [unzip(_:count:)](../methods/unzip(_:count:)/)
--   [whenAll(_:notifyOn:)](../methods/whenAll(_:notifyOn:)/)
--   [whenAll(_:notifyOn:)](../methods/whenAll(_:notifyOn:)/)
 
 # Reference Documentation
 This reference documentation was generated with
