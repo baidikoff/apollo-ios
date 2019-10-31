@@ -14,7 +14,7 @@ let package = Package(
 			targets: ["ApolloSQLite"]),
 		.library(
 			name: "ApolloWebSocket",
-			targets: ["ApolloWebSocket"]),
+			targets: ["Apollo", "ApolloWebSocket"]),
     ],
     dependencies: [
 		.package(url: "https://github.com/stephencelis/SQLite.swift.git", .exact("0.12.2")),
